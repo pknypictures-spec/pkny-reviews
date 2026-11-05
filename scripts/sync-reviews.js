@@ -32,22 +32,37 @@ const FALLBACK_REVIEWS = [
   },
 ];
 
+// Bei Fehlern bestehende (echte) Bewertungen behalten; Fallback nur, wenn noch keine Datei existiert
+function keepExistingOrFallback(reason) {
+  if (fs.existsSync(OUTPUT_PATH)) {
+    console.log(`::warning::${reason} – bestehende reviews.json bleibt unverändert.`);
+    return;
+  }
+  console.log(`${reason} – keine bestehende Datei, Fallback wird verwendet.`);
+  write(FALLBACK_REVIEWS);
+}
+
 async function fetchReviews() {
   if (!API_KEY) {
-    console.log("Kein API Key – Fallback wird verwendet.");
-    return write(FALLBACK_REVIEWS);
+    return keepExistingOrFallback("Kein API Key (Secret GOOGLE_PLACES_API_KEY fehlt)");
   }
 
   const url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${PLACE_ID}&fields=reviews&language=de&key=${API_KEY}`;
 
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
+    if (!res.ok) {
+      return keepExistingOrFallback(`Google API HTTP ${res.status}`);
+    }
     const data = await res.json();
     console.log("API Status:", data.status);
 
-    if (data.status !== "OK" || !data.result?.reviews?.length) {
-      console.log("Keine Reviews – Fallback.");
-      return write(FALLBACK_REVIEWS);
+    if (data.status !== "OK") {
+      const detail = data.error_message ? ` (${data.error_message})` : "";
+      return keepExistingOrFallback(`Google API Status ${data.status}${detail}`);
+    }
+    if (!data.result?.reviews?.length) {
+      return keepExistingOrFallback("Keine Reviews in der API-Antwort");
     }
 
     const reviews = data.result.reviews
@@ -61,11 +76,13 @@ async function fetchReviews() {
         profile_photo_url: r.profile_photo_url ?? "",
       }));
 
-    write(reviews.length ? reviews : FALLBACK_REVIEWS);
+    if (!reviews.length) {
+      return keepExistingOrFallback("Keine Reviews mit mindestens 4 Sternen");
+    }
+    write(reviews);
     console.log(`${reviews.length} Reviews gespeichert.`);
   } catch (err) {
-    console.error("Fehler:", err.message);
-    write(FALLBACK_REVIEWS);
+    keepExistingOrFallback(`Fehler beim Abruf: ${err.name === "TimeoutError" ? "Zeitüberschreitung" : err.message}`);
   }
 }
 
